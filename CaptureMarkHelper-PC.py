@@ -6,7 +6,7 @@ import cv2
 import tkinter
 import os
 import tkinter.simpledialog
-from mss import mss
+import mss
 
 # 修改以下参数来运行
 
@@ -14,18 +14,18 @@ from mss import mss
 scale = 0.5
 
 # 截图保存路径，以/结束（确保路径已存在）
-save_file_path = "./img/"
+save_file_path = "./BrownDust2/img/"
 
 # py变量字典文件
-pos_img_dict = "./testDict.py"
+pos_img_dict = "./BrownDust2/testDict.py"
 
 # 动作类型 1=截图  2=标点  3=标线（取起终点组成向量） 4=标记区域
-action = 4
+action = 1
 
 # ===================================================
 # PC截图功能
 def capture_pc_screen(output_filename):
-    with mss() as sct:
+    with mss.mss() as sct:
         # 获取最大分辨率显示器
         monitor = sct.monitors[1]  # 主显示器
         sct_img = sct.grab(monitor)
@@ -49,9 +49,22 @@ def isVarExist(varName):
     return False
 
 def createVar(varName, value, type):
+    """
+    创建变量到字典文件中
+    
+    参数:
+        varName: 变量名
+        value: 变量值
+        type: 变量类型 1=图片路径 2=坐标点 3=向量 4=区域范围 5=图片位置信息
+    """
     with open(pos_img_dict, 'a+', encoding='utf-8') as f:
         if type == 1:
+            # 保存图片路径
             f.write(f"{varName} = \"{value}\"\n")
+
+        elif type == 5:
+            # 保存图片位置信息
+            f.write(f"{value}\n")
         else:
             f.write(f"{varName} = {value}\n")
 
@@ -80,8 +93,21 @@ def draw_Rect(event, x, y, flags, param):
             if isVarExist(res):
                 tkinter.simpledialog.messagebox.showerror("错误", "该变量名已存在，请更换一个或手动去文件中删除！")
             else:
+                # 保存裁剪的图片
                 cv2.imwrite(save_file_path + res + ".png", cropped)
+                # 计算相对位置信息
+                h_src, w_src = img_source.shape[:2]
+                rel_x0, rel_y0 = x0/w_src, y0/h_src  # 相对起始位置
+                rel_x1, rel_y1 = x1/w_src, y1/h_src  # 相对结束位置
+                rel_w = (x1-x0)/w_src  # 相对宽度
+                rel_h = (y1-y0)/h_src  # 相对高度
+                
+                # 创建图片路径变量
                 createVar(res, save_file_path + res + ".png", 1)
+                # 创建位置信息变量
+                pos_info = f"{res}_pos = {{'x0': {rel_x0:.4f}, 'y0': {rel_y0:.4f}, 'x1': {rel_x1:.4f}, 'y1': {rel_y1:.4f}, 'w': {rel_w:.4f}, 'h': {rel_h:.4f}}}"
+                createVar(res + "_pos", pos_info, 5)
+                
                 tkinter.simpledialog.messagebox.showinfo("提示", "创建完成！")
     elif event == cv2.EVENT_MBUTTONUP:
         if startPos == (0, 0) and stopPos == (0, 0):
