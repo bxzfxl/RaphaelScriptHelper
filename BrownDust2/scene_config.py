@@ -12,98 +12,104 @@ import numpy as np
 from enum import Enum, auto
 from dataclasses import dataclass
 from typing import Dict, Callable, Optional, Tuple
+import inspect
 from brownDust2Dict import *
 from utils import click_random, show_message_dialog
 
+def get_scene_elements() -> Dict[str, tuple]:
+    """获取所有需要检测的场景元素"""
+    elements = {}
+    # 遍历brownDust2Dict中的所有变量，自动收集元素
+    for var_name, value in globals().items():
+        if var_name.endswith('_pos') and isinstance(value, dict):
+            element_name = var_name[:-4]
+            # 确保对应的图片路径变量存在
+            if element_name in globals():
+                elements[element_name] = (globals()[element_name], value)
+    return elements
+
 class Config:
     """全局配置类"""
-    # 元素识别置信度配置
-    CONFIDENCE = {
-        'mainline': 0.7,    # 主线按钮
-        'skip': 0.7,        # 跳过按钮
-        'skipChat': 0.8,    # 对话跳过
-        'exit': 0.8,        # 退出按钮
-        'autoMove': 0.8,    # 自动移动
-        'inter': 0.85,      # 交互按钮
-        'war': 0.7,         # 战斗状态
-        'confirm': 0.7,     # 确认按钮
-        'pause': 0.8,       # 暂停标志
-    }
-    
-    # 场景匹配配置
-    SCENE_MATCH = {
-        'mainline': {
-            'confidence': {'mainline': 0.7, 'inter': 0.85},
-            'required': {'mainline': True, 'inter': False, 'pause': False}
-        },
-        'interaction': {
-            'confidence': {'mainline': 0.7, 'inter': 0.85},
-            'required': {'mainline': True, 'inter': True}
-        },
-        'dialogue': {
-            'confidence': {'skip': 0.7, 'mainline': 0.7},
-            'required': {'skip': True, 'mainline': False}
-        },
-        'deep_dialogue': {
-            'confidence': {'skipChat': 0.8},
-            'required': {'skipChat': True}
-        },
-        'battle': {
-            'confidence': {'war': 0.7},
-            'required': {'war': True}
-        },
-        'battle_end': {
-            'confidence': {'exit': 0.8},
-            'required': {'exit': True}
-        },
-        'confirm': {
-            'confidence': {'confirm': 0.7},
-            'required': {'confirm': True}
-        },
-        'automove': {
-            'confidence': {'autoMove': 0.8},
-            'required': {'autoMove': True}
-        },
-        'pause': {
-            'confidence': {'pause': 0.8},
-            'required': {'pause': True}
+    # 基础置信度配置 - 降低默认置信度以适应实际情况
+    DEFAULT_CONFIDENCE = 0.7  # 默认置信度
+    HIGH_CONFIDENCE = 0.75    # 高置信度要求
+
+    @classmethod
+    def get_confidence_dict(cls) -> Dict[str, float]:
+        """自动从brownDust2Dict中获取所有图像元素并设置置信度"""
+        confidence_dict = {}
+        for element_name, _ in get_scene_elements().items():
+            # 根据元素类型设置不同的置信度
+            if any(key in element_name.lower() for key in ['chat', 'skip', 'confirm']):
+                confidence_dict[element_name] = cls.HIGH_CONFIDENCE
+            else:
+                confidence_dict[element_name] = cls.DEFAULT_CONFIDENCE
+        return confidence_dict
+
+    @classmethod
+    def get_scene_patterns(cls) -> Dict[str, Dict]:
+        """自动生成场景匹配模式"""
+        patterns = {}
+        confidence_dict = cls.get_confidence_dict()
+        
+        # 场景模式定义
+        scene_patterns = {
+            'mainline': ['mainline'],
+            'interaction': ['mainline', 'inter'],
+            'dialogue': ['skip'],
+            'deep_dialogue': ['skipChat'],
+            'battle': ['war'],
+            'battle_end': ['exit'],
+            'confirm': ['confirm'],
+            'automove': ['autoMove'],
+            'pause': ['pause'],
+            'automainline': ['automainline'],
+            'automainline_over': ['automainline_over'],
+            'automainline_war': ['automainline_war']
         }
-    }
+        
+        # 生成场景模式
+        for scene_name, required_elements in scene_patterns.items():
+            patterns[scene_name] = {
+                'confidence': {e: confidence_dict.get(e, cls.DEFAULT_CONFIDENCE) 
+                             for e in required_elements if e in confidence_dict},
+                'required': {e: True for e in required_elements}
+            }
+        
+        return patterns
+
+# 初始化配置
+CONFIDENCE = Config.get_confidence_dict()
+SCENE_MATCH = Config.get_scene_patterns()
 
 class Scene(Enum):
-    """游戏场景枚举"""
-    MAINLINE = auto()      # 主线入口
-    INTERACTION = auto()    # 交互场景
-    DIALOGUE = auto()      # 对话场景
-    DEEP_DIALOGUE = auto() # 深入对话
-    BATTLE = auto()        # 战斗中
-    BATTLE_END = auto()    # 战斗结束
-    CONFIRM = auto()       # 确认场景
-    AUTOMOVE = auto()      # 自动移动
-    PAUSE = auto()         # 人工介入
-    UNKNOWN = auto()       # 未知场景
+    """游戏场景枚举，自动从处理函数生成"""
+    UNKNOWN = auto()
+    
+    @classmethod
+    def _generate_scenes(cls):
+        """根据处理函数自动生成场景枚举"""
+        scenes = {'UNKNOWN': cls.UNKNOWN}
+        for name, func in globals().items():
+            if name.startswith('handle_'):
+                scene_name = name[7:].upper()
+                scenes[scene_name] = auto()
+        return scenes
 
-@dataclass
-class ScenePattern:
-    """场景特征模式"""
-    elements: Dict[str, float]       # 需要检测的元素及其置信度
-    required_matches: Dict[str, bool] # 元素是否必须存在
-
-@dataclass
-class SceneConfig:
-    """场景配置"""
-    pattern: ScenePattern    # 场景匹配模式
-    handler: Callable        # 场景处理函数
-    description: str         # 场景描述
-
+# 场景处理函数
 def handle_mainline(manager) -> None:
-    """处理主线场景"""
-    from utils import click_random  # 避免循环导入
+    """
+    处理主线场景
+    需要元素: mainline
+    """
     click_random(mainLine_click)
     time.sleep(2)
 
 def handle_interaction(manager) -> None:
-    """处理交互场景"""
+    """
+    处理交互场景
+    需要元素: mainline, inter
+    """
     pydirectinput.press('f')
     time.sleep(1)
 
@@ -146,102 +152,85 @@ def handle_pause(manager) -> None:
         manager.show_intervention_dialog()
     time.sleep(1)
 
-# 场景配置字典
-SCENE_CONFIGS = {
-    Scene.MAINLINE: SceneConfig(
-        pattern=ScenePattern(
-            elements=Config.SCENE_MATCH['mainline']['confidence'],
-            required_matches=Config.SCENE_MATCH['mainline']['required']
-        ),
-        handler=handle_mainline,
-        description="主线入口场景"
-    ),
-    
-    Scene.INTERACTION: SceneConfig(
-        pattern=ScenePattern(
-            elements=Config.SCENE_MATCH['interaction']['confidence'],
-            required_matches=Config.SCENE_MATCH['interaction']['required']
-        ),
-        handler=handle_interaction,
-        description="交互场景"
-    ),
-    
-    Scene.DIALOGUE: SceneConfig(
-        pattern=ScenePattern(
-            elements=Config.SCENE_MATCH['dialogue']['confidence'],
-            required_matches=Config.SCENE_MATCH['dialogue']['required']
-        ),
-        handler=handle_dialogue,
-        description="对话场景"
-    ),
-    
-    Scene.DEEP_DIALOGUE: SceneConfig(
-        pattern=ScenePattern(
-            elements=Config.SCENE_MATCH['deep_dialogue']['confidence'],
-            required_matches=Config.SCENE_MATCH['deep_dialogue']['required']
-        ),
-        handler=handle_deep_dialogue,
-        description="深入对话场景"
-    ),
-    
-    Scene.BATTLE: SceneConfig(
-        pattern=ScenePattern(
-            elements=Config.SCENE_MATCH['battle']['confidence'],
-            required_matches=Config.SCENE_MATCH['battle']['required']
-        ),
-        handler=handle_battle,
-        description="战斗场景"
-    ),
-    
-    Scene.BATTLE_END: SceneConfig(
-        pattern=ScenePattern(
-            elements=Config.SCENE_MATCH['battle_end']['confidence'],
-            required_matches=Config.SCENE_MATCH['battle_end']['required']
-        ),
-        handler=handle_battle_end,
-        description="战斗结束场景"
-    ),
-    
-    Scene.CONFIRM: SceneConfig(
-        pattern=ScenePattern(
-            elements=Config.SCENE_MATCH['confirm']['confidence'],
-            required_matches=Config.SCENE_MATCH['confirm']['required']
-        ),
-        handler=handle_confirm,
-        description="确认场景"
-    ),
-    
-    Scene.AUTOMOVE: SceneConfig(
-        pattern=ScenePattern(
-            elements=Config.SCENE_MATCH['automove']['confidence'],
-            required_matches=Config.SCENE_MATCH['automove']['required']
-        ),
-        handler=handle_automove,
-        description="自动移动场景"
-    ),
-    
-    Scene.PAUSE: SceneConfig(
-        pattern=ScenePattern(
-            elements=Config.SCENE_MATCH['pause']['confidence'],
-            required_matches=Config.SCENE_MATCH['pause']['required']
-        ),
-        handler=handle_pause,
-        description="暂停场景"
-    )
-}
+def handle_automainline(manager) -> None:
+    """处理快速主线场景"""
+    from utils import click_random  # 避免循环导入
+    click_random(automainline_click)  # 随机点击automainline区域
+    time.sleep(2)
 
-def get_scene_elements() -> Dict[str, tuple]:
-    """获取所有需要检测的场景元素"""
-    return {
-        'mainline': (mainline, mainline_pos),
-        'skip': (skip, skip_pos),
-        'inter': (inter, inter_pos),
-        'skipChat': (skipchat, skipchat_pos),
-        'war': (war, war_pos),
-        'exit': (exit, exit_pos),
-        'autoMove': (automove, automove_pos),
-        'pause': (pause, pause_pos),
-    } 
+def handle_automainline_over(manager) -> None:
+    """处理快速主线完成场景"""
+    from utils import click_random  # 避免循环导入
+    click_random(automainline_click)  # 随机点击automainline区域
+    time.sleep(2)
+
+def handle_automainline_war(manager) -> None:
+    """处理快速主线战斗场景"""
+    from utils import click_random  # 避免循环导入
+    click_random(automainline_click)  # 随机点击automainline区域
+    time.sleep(2)
+
+def get_scene_names():
+    """获取所有场景名称"""
+    scenes = ['UNKNOWN']  # 始终包含UNKNOWN场景
+    for name in globals():
+        if name.startswith('handle_'):
+            scene_name = name[7:].upper()
+            scenes.append(scene_name)
+    return scenes
+
+# 动态生成Scene枚举
+Scene = Enum('Scene', {name: i for i, name in enumerate(get_scene_names())})
+
+@dataclass
+class ScenePattern:
+    """场景特征模式"""
+    elements: Dict[str, float]
+    required_matches: Dict[str, bool]
+
+@dataclass
+class SceneConfig:
+    """场景配置"""
+    pattern: ScenePattern
+    handler: Callable
+    description: str
+
+# 自动生成场景配置
+def generate_scene_configs():
+    """根据处理函数自动生成场景配置"""
+    configs = {}
+    for scene in Scene:
+        if scene == Scene.UNKNOWN:
+            continue
+            
+        handler_name = f"handle_{scene.name.lower()}"
+        handler = globals().get(handler_name)
+        
+        if handler:
+            scene_name = scene.name.lower()
+            if scene_name in SCENE_MATCH:
+                pattern = SCENE_MATCH[scene_name]
+                
+                # 安全地获取函数描述
+                description = scene_name
+                if handler.__doc__:
+                    doc_lines = handler.__doc__.strip().split('\n')
+                    if len(doc_lines) > 1:
+                        description = doc_lines[1].strip()
+                    else:
+                        description = doc_lines[0].strip()
+                
+                configs[scene] = SceneConfig(
+                    pattern=ScenePattern(
+                        elements=pattern['confidence'],
+                        required_matches=pattern['required']
+                    ),
+                    handler=handler,
+                    description=description
+                )
+    return configs
+
+SCENE_CONFIGS = generate_scene_configs()
 
 class SceneManager:
     """场景管理器：负责识别和处理不同的游戏场景"""
@@ -314,7 +303,13 @@ class SceneManager:
             
             template = cv2.imread(target)
             if template is None:
-                raise FileNotFoundError(f"模板文件不存在: {target}")
+                logging.error(f"模板文件不存在或无法读取: {target}")
+                return None
+            
+            # 确保图像和模板大小合适
+            if img.shape[0] < template.shape[0] or img.shape[1] < template.shape[1]:
+                logging.warning(f"ROI区域({img.shape})小于模板大小({template.shape})")
+                return None
             
             res = cv2.matchTemplate(img, template, cv2.TM_CCOEFF_NORMED)
             _, max_val, _, max_loc = cv2.minMaxLoc(res)
@@ -345,7 +340,7 @@ class SceneManager:
         for element_name, (image_path, pos_info) in get_scene_elements().items():
             result = self.check_image(
                 image_path, 
-                Config.CONFIDENCE[element_name],  # 使用全局配置的置信度
+                CONFIDENCE[element_name],  # 使用全局配置的置信度
                 pos_info
             )
             detected_elements[element_name] = bool(result)

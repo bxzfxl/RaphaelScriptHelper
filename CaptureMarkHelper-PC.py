@@ -20,7 +20,7 @@ save_file_path = "./BrownDust2/img/"
 pos_img_dict = "./BrownDust2/testDict.py"
 
 # 动作类型 1=截图  2=标点  3=标线（取起终点组成向量） 4=标记区域
-action = 1
+action = 4
 
 # ===================================================
 # PC截图功能
